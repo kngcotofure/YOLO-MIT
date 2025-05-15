@@ -1,6 +1,8 @@
 from pathlib import Path
 
+import random
 import torch
+import torch.nn as nn
 from torch import Tensor
 
 from yolo.config.config import Config
@@ -104,3 +106,76 @@ class FastModelLoader:
         torch.save(model_trt.state_dict(), self.model_path)
         logger.info(f":inbox_tray: TensorRT model saved to {self.model_path}")
         return model_trt
+    
+class End2End(nn.Module):
+    def __init__(self, model, converter, nms):
+        super().__init__()
+        self.model = model
+        self.converter = converter
+        self.nms = nms
+        
+    def forward(self, x):
+        prediction = self.model(x)
+        prediction = self.converter(prediction["Main"])
+        score, _, pred_bbox = prediction[:3]
+
+        if score.dim() == 2:
+            score = score.unsqueeze(0)  # [1, N, C]
+        if pred_bbox.dim() == 2:
+            pred_bbox = pred_bbox.unsqueeze(0)  # [1, N, 4]
+            
+        output = self.nms(pred_bbox, score)  # [num_selected, 7]
+        return output
+     
+class ONNX_NMS(nn.Module):
+    def __init__(self, max_output_boxes=100, iou_threshold=0.45, score_threshold=0.25, num_classes=80, max_wh=640, device="cpu"):
+        super().__init__()
+        self.max_output_boxes = torch.tensor([max_output_boxes], dtype=torch.int64).to(device)
+        self.iou_threshold = torch.tensor([iou_threshold], dtype=torch.float32).to(device)
+        self.score_threshold = torch.tensor([score_threshold], dtype=torch.float32).to(device)
+        self.num_classes = num_classes
+        self.max_wh = max_wh
+
+    def forward(self, boxes, scores):
+        B, N, C = scores.shape
+        conf, cls_id = scores.max(2, keepdim=True)  # (B, N, 1)
+        offset = cls_id.float() * self.max_wh  # offset theo class
+        boxes_for_nms = boxes + offset  # (B, N, 4)
+
+        scores_transposed = conf.transpose(1, 2)  # (B, 1, N)
+
+        selected_indices = ORT_NMS.apply(boxes_for_nms, scores_transposed, self.max_output_boxes, self.iou_threshold, self.score_threshold)
+
+        batch_id = selected_indices[:, 0]
+        idx = selected_indices[:, 2]
+
+        selected_boxes = boxes[batch_id, idx]
+        selected_scores = conf[batch_id, idx]
+        selected_classes = cls_id[batch_id, idx].float()
+
+        batch_id = batch_id.unsqueeze(1).float()
+
+        return torch.cat([batch_id, selected_boxes, selected_classes, selected_scores], dim=1)
+    
+class ORT_NMS(torch.autograd.Function):
+    '''ONNX-Runtime NMS operation'''
+    @staticmethod
+    def forward(ctx,
+                boxes,
+                scores,
+                max_output_boxes_per_class=torch.tensor([100]),
+                iou_threshold=torch.tensor([0.45]),
+                score_threshold=torch.tensor([0.25])):
+        device = boxes.device
+        batch = scores.shape[0]
+        num_det = random.randint(0, 100)
+        batches = torch.randint(0, batch, (num_det,)).sort()[0].to(device)
+        idxs = torch.arange(100, 100 + num_det).to(device)
+        zeros = torch.zeros((num_det,), dtype=torch.int64).to(device)
+        selected_indices = torch.cat([batches[None], zeros[None], idxs[None]], 0).T.contiguous()
+        selected_indices = selected_indices.to(torch.int64)
+        return selected_indices
+
+    @staticmethod
+    def symbolic(g, boxes, scores, max_output_boxes_per_class, iou_threshold, score_threshold):
+        return g.op("NonMaxSuppression", boxes, scores, max_output_boxes_per_class, iou_threshold, score_threshold)

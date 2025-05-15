@@ -1,0 +1,8 @@
+task: export
+
+fast_inference: onnx
+
+dataset:
+  class_num: 80
+
+device: cpu

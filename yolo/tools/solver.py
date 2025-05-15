@@ -1,3 +1,5 @@
+import os
+import torch.nn as nn
 from math import ceil
 from pathlib import Path
 
@@ -139,3 +141,60 @@ class InferenceModel(BaseModel):
         save_image_path = Path(self.trainer.default_root_dir) / f"frame{batch_idx:03d}.png"
         img.save(save_image_path)
         print(f"💾 Saved visualize image at {save_image_path}")
+
+
+class ExportModel(nn.Module):
+    def __init__(self, cfg: Config, device):
+        super().__init__()
+        self.cfg = cfg
+        self.class_num = cfg.dataset.class_num
+        self.device = device
+        
+        if self.cfg.weight == True:
+            cfg.weight = Path("weights") / f"{cfg.model.name}.pt"
+        self.model_path = os.path.splitext(self.cfg.weight)[0] + "-end2end.onnx"
+
+        self.model = create_model(self.cfg.model, class_num=self.class_num, weight_path=self.cfg.weight).eval()
+        
+        self.converter = create_converter(
+            self.cfg.model.name, self.model, self.cfg.model.anchor, self.cfg.image_size, self.device
+        )
+        
+    def export(self, export_mode:str = "onnx_end2end"):
+        import torch
+        
+        model = self.model.eval()
+        dummy_input = torch.ones((1, 3, *self.cfg.image_size))
+        
+        if export_mode == "onnx_end2end":
+            return self.export_onnx_end2end(model, dummy_input, self.converter)
+        
+    
+    def export_onnx_end2end(self, model, image, converter, score_threshold=0.25, iou_threshold=0.45, max_output_boxes=100):
+        from torch.onnx import export
+        from utils.deploy_utils import ONNX_NMS, End2End
+        
+        dynamic_axes = {'image': {0 : 'batch'}, 'output' : {0: 'batch'}} # variable length axes
+        
+        nms_module = ONNX_NMS(
+            max_output_boxes=max_output_boxes,
+            iou_threshold=iou_threshold,
+            score_threshold=score_threshold,
+            num_classes=self.class_num,
+            device=self.device
+        )
+    
+        # End2End
+        model = End2End(model, converter, nms_module)
+        
+        export(
+            model,
+            image,
+            self.model_path,
+            export_params=True, # store the trained parameter weights inside the model file
+            opset_version=13,
+            do_constant_folding=True, # whether to execute constant folding for optimization
+            input_names=["image"],
+            output_names=["output"],
+            dynamic_axes=dynamic_axes,
+        )
