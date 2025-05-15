@@ -86,8 +86,7 @@ def draw(image, predictions, thickness=2, font_scale=0.5, font_color=(0, 255, 0)
         score = round(score, 2)
 
         x_min, y_min, x_max, y_max, cls_id = map(int, [x_min, y_min, x_max, y_max, cls_id])
-        # label = f"{self.class_names.get(cls_id, 'Unknown')}: {score:.2f}"
-        label = "score:.2f"
+        label = f"{score:.2f}"
         cv2.rectangle(image, (x_min, y_min), (x_max, y_max), color=font_color, thickness=thickness)
         cv2.putText(image, label, (x_min, y_min - 10),
                     cv2.FONT_HERSHEY_SIMPLEX, font_scale, font_color, font_thickness)

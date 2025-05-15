@@ -118,6 +118,7 @@ class End2End(nn.Module):
         prediction = self.model(x)
         prediction = self.converter(prediction["Main"])
         score, _, pred_bbox = prediction[:3]
+        score = score.sigmoid() * 1
 
         if score.dim() == 2:
             score = score.unsqueeze(0)  # [1, N, C]
